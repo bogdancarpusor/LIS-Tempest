@@ -22,6 +22,7 @@ import netaddr
 from oslo_log import log
 from oslo_serialization import jsonutils as json
 import six
+import string
 
 from tempest.common import compute
 from tempest.common.utils import data_utils
@@ -2057,15 +2058,27 @@ class LisBase(ScenarioTest):
         self.assertTrue(s_out.strip().lower() != 'lost communication', assert_msg)
 
     def format_disk(self, expected_disk_count, filesystem):
-        script_name = 'STOR_Lis_Disk.sh'
-        script_path = '/core/scripts/' + script_name
-        destination = '/tmp/'
-        my_path = os.path.abspath(
-            os.path.normpath(os.path.dirname(__file__)))
-        full_script_path = my_path + script_path
-        cmd_params = [expected_disk_count, filesystem]
-        self.linux_client.execute_script(
-            script_name, cmd_params, full_script_path, destination)
+        disks_no = self.count_disks()
+        if disks_no != expected_disk_count:
+            LOG.error('Disk count inside VM is different than the expected disk count')
+            raise lib_exc.TempestException()
+
+        drive_list = ['/dev/sd'+letter for letter in string.letters]
+        for drive_path in drive_list:
+            if drive_path == '/dev/sda':
+                continue
+
+            self.linux_client.delete_partition(drive_path)
+            self.linux_client.create_new_partition(drive_path)
+            time.sleep(5)
+            partition_path = drive_path + '1'
+            self.linux_client.make_fs(partition_path, filesystem)
+            self.linux_client.mount(partition_path)
+            self.linux_client.exec_command('sudo mkdir /mnt/example')
+            self.linux_client.exec_command(
+                'sudo dd if=/dev/zero of=/mnt/example/data bs=10M count=50'
+            )
+            self.linux_client.umount()
 
     def count_disks(self):
         try:
@@ -2081,48 +2094,86 @@ class LisBase(ScenarioTest):
             raise exc
 
     def increase_disk_size(self):
-        script_name = 'STOR_diff_disk.sh'
-        script_path = '/core/scripts/' + script_name
-        destination = '/tmp/'
-        my_path = os.path.abspath(
-            os.path.normpath(os.path.dirname(__file__)))
-        full_script_path = my_path + script_path
-        cmd_params = []
-        self.linux_client.execute_script(
-            script_name, cmd_params, full_script_path, destination)
+        partitions_no = int(self.linux_client.exec_command(
+            'sudo cat /proc/partitions | grep sd[^a] | wc -l'
+        ))
+        partitions_no -= 1
+        drive_list = ['/dev/sd'+letter for letter in string.letters]
+
+        for drive in drive_list:
+            if drive == '/dev/sda':
+                continue
+
+            if self.linux_client.check_file_existence(drive):
+                break
+
+            for index in range(1, partitions_no):
+                self.linux_client.delete_partition(drive, index)
+                time.sleep(5)
+
+            self.linux_client.create_new_partition(drive, '1', '+500M')
+            time.sleep(5)
+            self.linux_client.create_new_partition(drive, '2')
+            time.sleep(5)
+
+            drive_name = drive.split('/')[2]
+            self.linux_client.make_fs(drive_name+'1', fs='ext3')
+            self.linux_client.make_fs(drive_name+'2', fs='ext3')
+
+            self.linux_client.exec_command('sudo mkdir /mnt/1')
+            self.linux_client.exec_command('sudo mkdir /mnt/2')
+            self.linux_client.mount(drive_name+'1', mount_path='/mnt/1')
+            self.linux_client.mount(drive_name+'2', mount_path='/mnt/2')
 
     def check_iso(self):
-        script_name = 'LIS_CD.sh'
-        script_path = '/core/scripts/' + script_name
-        destination = '/tmp/'
-        my_path = os.path.abspath(
-            os.path.normpath(os.path.dirname(__file__)))
-        full_script_path = my_path + script_path
-        cmd_params = []
-        self.linux_client.execute_script(
-            script_name, cmd_params, full_script_path, destination)
+        LOG.info('Check for cdrom modules')
+        self.linux_client.check_cdrom()
+        LOG.info('Mount cdrom')
+        self.linux_client.mount('cdrom')
+        LOG.info('Check mount path')
+        self.linux_client.exec_command('cd /mnt')
+        self.linux_client.exec_command('ls /mnt')
+        self.linux_client.exec_command('cd ~')
+        LOG.info('Unmount cdrom')
+        self.linux_client.umount(ignore_exit_status=True)
 
     def check_floppy(self):
-        script_name = 'LIS_Floppy_Disk.sh'
-        script_path = '/core/scripts/' + script_name
-        destination = '/tmp/'
-        my_path = os.path.abspath(
-            os.path.normpath(os.path.dirname(__file__)))
-        full_script_path = my_path + script_path
-        cmd_params = []
-        self.linux_client.execute_script(
-            script_name, cmd_params, full_script_path, destination)
+        try:
+            LOG.info('Check if floppy module is loaded')
+            self.linux_client.verify_lis_module('floppy')
+        except lib_exc.SSHExecCommandFailed:
+            LOG.info('Floppy module is not present in VM. Loading module manually')
+            self.linux_client.add_module('floppy')
+            time.sleep(3)
+
+        self.linux_client.exec_command('sudo mkfs -t vfat /dev/fd0')
+        self.linux_client.mount('/dev/fd0')
+        self.linux_client.exec_command("echo 'Sample write operation' > /mnt/sample.txt")
+        self.linux_client.exec_command('cat /mnt/sample.txt')
+        self.linux_client.exec_command('rm /mnt/sample.txt')
+        self.linux_client.umount()
 
     def check_vcpu_offline(self):
-        script_name = 'vcpu_verify_online.sh'
-        script_path = '/core/scripts/' + script_name
-        destination = '/tmp/'
-        my_path = os.path.abspath(
-            os.path.normpath(os.path.dirname(__file__)))
-        full_script_path = my_path + script_path
-        cmd_params = []
-        self.linux_client.execute_script(
-            script_name, cmd_params, full_script_path, destination)
+        try:
+            core_no = self.linux_client.get_cores_no()
+            LOG.info('Detected %s CPU cores' % core_no)
+            for core in range(1, core_no):
+                LOG.info('Checking cpu %s in /sys/devices' % core)
+                file_path = '/sys/devices/system/cpu/cpu%s/online' % core
+                if self.linux_client.check_file_existence(file_path):
+                    cmd = 'sudo bash -c echo 0 > %s > /dev/null 2>&1' % file_path
+                    self.linux_client.exec_command(cmd)
+                    cmd = 'cat %s' % file_path
+                    if self.linux_client.exec_command(cmd) == '0':
+                        LOG.error('CPU %s can be offline' % core)
+                        raise lib_exc.TempestException()
+                    else:
+                        LOG.info('CPU %s can not be offline' % core)
+
+        except lib_exc.SSHExecCommandFailed as exc:
+            LOG.exception(exc)
+            self._log_console_output()
+            raise exc
 
     def send_kvp_client(self):
         script_name = 'kvp_client'

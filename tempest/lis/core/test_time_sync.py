@@ -62,15 +62,23 @@ class TimeSync(manager.LisBase):
 
     def check_ntp_time(self):
         try:
-            script_name = 'CORE_timesync_NTP.sh'
-            script_path = '/scripts/' + script_name
-            destination = '/tmp/'
-            my_path = os.path.abspath(
-                os.path.normpath(os.path.dirname(__file__)))
-            full_script_path = my_path + script_path
-            cmd_params = []
-            self.linux_client.execute_script(
-                script_name, cmd_params, full_script_path, destination)
+            max_delay = 5.0
+            wait_time = 10
+            self.linux_client.install_ntp()
+            LOG.info('Waiting %s seconds for the ntp server to sync' % wait_time)
+            self.linux_client.exec_command('sleep %d' % wait_time)
+
+            LOG.info('Checking if VM is in sync with the ntp server')
+            self.linux_client.exec_command('ntpq -p')
+
+            LOG.debug('Getting the offset between the ntp server and internal clock')
+            delay = self.linux_client.exec_command("ntpdc -c loopinfo | awk 'NR==1 {print $2}'")
+
+            LOG.info('NTP offset is %s seconds' % delay)
+            if float(delay) >= max_delay:
+                # TODO - Add more details for the raised exception
+                raise lib_exc.TempestException()
+            LOG.info('NTP time synced')
 
         except lib_exc.SSHExecCommandFailed as exc:
 
@@ -124,4 +132,21 @@ class TimeSync(manager.LisBase):
         exec_time = t1 - t0
         LOG.debug('Duration of get_host_time %s', exec_time)
         self.assertTrue(abs(vm_time - host_time) - exec_time < MAXIMUM_DELAY)
+        self.servers_client.delete_server(self.instance['id'])
+
+    @test.attr(type=['smoke', 'core', 'timesync'])
+    @test.services('compute', 'network')
+    def test_time_sync_paused_state(self):
+        self.spawn_vm()
+        self._initiate_linux_client(self.floating_ip['floatingip']['floating_ip_address'],
+                                    self.ssh_user, self.keypair['private_key'])
+        self.pause_vm(self.server_id)
+        time.sleep(SLEEP_TIME)
+        self.unpause_vm(self.server_id)
+        vm_time = self.get_vm_time()
+        start = time.time()
+        host_time = self.get_host_time()
+        finish = time.time()
+        LOG.debug('Duration of get_host_time %s', finish - start)
+        self.assertTrue(abs(vm_time - host_time) - (finish - start) < MAXIMUM_DELAY)
         self.servers_client.delete_server(self.instance['id'])

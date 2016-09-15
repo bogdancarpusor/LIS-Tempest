@@ -39,17 +39,6 @@ class RemoteClientBase():
                                      ssh_timeout, pkey=pkey,
                                      channel_timeout=connect_timeout)
 
-    def get_os_type(self):
-        script_name = 'get_os.sh'
-        destination = '/tmp/'
-        my_path = os.path.abspath(
-            os.path.normpath(os.path.dirname(__file__)))
-        full_script_path = my_path + '/' + script_name
-        cmd_params = []
-        distro = self.execute_script(
-            script_name, cmd_params, full_script_path, destination)
-        return distro.strip().lower()
-
     def exec_command(self, cmd, ignore_exit_status=False):
         # Shell options below add more clearness on failures,
         # path is extended for some non-cirros guest oses (centos7)
@@ -99,6 +88,60 @@ class RemoteClient(RemoteClientBase):
         output = self.exec_command('free -m | grep Mem')
         if output:
             return output.split()[1]
+
+    def install_ntp(self):
+        os_details = self.get_os_type()
+
+        if os_details['vendor'] in ['Fedora', 'CentOS', 'Red Hat', 'OracleServer']:
+            if not self.exec_command('ntpstat -p 1> /dev/null 2> /dev/null'):
+                LOG.debug('Attempting to install NTPD')
+                self.exec_command('yum install -y ntp ntdate ntd-doc')
+                self.exec_command('chkconfig ntpd on')
+                self.exec_command('ntpdate pool.ntp.org')
+                self.exec_command('service ntpd start')
+                LOG.debug('NTPD install successfully')
+            self.exec_command('service ntpd restart')
+        elif os_details['vendor'] in ['SUSE Linux', 'openSUSE']:
+            pass
+        elif os_details['package'] == 'deb':
+            if not self.exec_command('ntpq -p 1> /dev/null 2> /dev/null'):
+                LOG.debug('Attempting to install NTP')
+                self.exec_command('apt-get install -y ntp')
+                LOG.debug('NTP installed successfully')
+            self.exec_command('service ntp restart')
+        else:
+            LOG.error('Distro not supported')
+            raise tempest.lib.exceptions.NotImplemented
+
+    def get_os_type(self):
+        os_details = dict()
+
+        if not self.check_file_existence('/etc/lsb-relese'):
+            if self.check_file_existence('/etc/redhat-release') or \
+                    self.check_file_existence('/etc/centos-release') or \
+                    self.check_file_existence('/etc/fedora-release'):
+                os_details['package'] = 'rpm'
+                self.exec_command('yum install -y redhat-lsb')
+            elif self.check_file_existence('/etc/SuSE-release'):
+                self.exec_command('zypper install -y lsb-release')
+                os_details['package'] = ''
+            elif self.check_file_existence('/etc/debian_version'):
+                os_details['package'] = 'deb'
+                self.exec_command('apt-get install -y lsb-release')
+
+        os_details['vendor'] = self.exec_command('lsb_release -i -s')
+        os_details['release'] = self.exec_command('lsb_release -r -s')
+        os_details['codename'] = self.exec_command('lsb_release -c -s')
+        os_details['update'] = ''
+        if 'SUSE' in os_details['vendor']:
+            if self.exec_command('lsb_release -i -s | grep -q openSUSE'):
+                os_details['vendor'] = 'openSUSE'
+            else:
+                os_details['vendor'] = 'SUSE Linux'
+        elif 'RedHat' in os_details['vendor']:
+            os_details['vendor'] = 'Red Hat'
+
+        return os_details
 
     def get_number_of_vcpus(self):
         output = self.exec_command('grep -c ^processor /proc/cpuinfo')
@@ -176,6 +219,10 @@ class RemoteClient(RemoteClientBase):
         cmd = "ps -ef | grep %s | grep -v 'grep' | awk {'print $1'}" % pr_name
         return self.exec_command(cmd).split('\n')
 
+    def get_cores_no(self):
+        cmd = 'grep -i processor -o /proc/cpuinfo'
+        return int(self.exec_command(cmd))
+
     def get_dns_servers(self):
         cmd = 'cat /etc/resolv.conf'
         resolve_file = self.exec_command(cmd).strip().split('\n')
@@ -219,12 +266,28 @@ class RemoteClient(RemoteClientBase):
             raise ValueError("need to set 'fixed_ip' for udhcpc client")
         return getattr(self, '_renew_lease_' + dhcp_client)(fixed_ip=fixed_ip)
 
+    def check_cdrom(self):
+        try:
+            self.exec_command("sudo lsmod | grep 'ata_piix\|isofs'")
+            LOG.info('ata_piix module is present')
+        except tempest.lib.exceptions.SSHExecCommandFailed as exc:
+            LOG.info('ata_piix module is not present in VM')
+            LOG.info('Loading ata_piix module')
+            self.exec_command('sudo insmod /lib/modules`uname -r`/kerne;/drivers/ata/ata_piix.ko')
+            LOG.info('ata_piix module loaded')
+
+    def add_module(self, module_name):
+        return int(
+            self.exec_command('modprobe %s' % module_name)
+        )
+
     def mount(self, dev_name, mount_path='/mnt'):
         cmd_mount = 'sudo mount /dev/%s %s' % (dev_name, mount_path)
         self.exec_command(cmd_mount)
 
-    def umount(self, mount_path='/mnt'):
-        self.exec_command('sudo umount %s' % mount_path)
+    def umount(self, mount_path='/mnt', ignore_exit_status=False):
+        self.exec_command(
+            'sudo umount %s' % mount_path, ignore_exit_status=ignore_exit_status)
 
     def make_fs(self, dev_name, fs='ext4'):
         cmd_mkfs = 'sudo /usr/sbin/mke2fs -t %s /dev/%s' % (fs, dev_name)
@@ -295,13 +358,19 @@ class RemoteClient(RemoteClientBase):
             'echo 1 > sudo /sys/block/sdb/device/rescan'
         self.exec_command(command)
 
-    def delete_partition(self, disk):
-        command = '(echo d; echo w) | sudo fdisk /dev/{disk} 2> /dev/null'.format(disk=disk)
+    def delete_partition(self, disk, partition=''):
+        command = '(echo d; echo {partition}; echo; echo w) | sudo fdisk /dev/{disk} 2> /dev/null'\
+            .format(disk=disk, partition=partition)
         self.exec_command(command)
 
     def recreate_partition(self, disk):
         command = '(echo d; echo n; echo; echo; echo; echo; echo w) | sudo fdisk /dev/{disk} 2> /dev/null'.format(disk=disk)
         self.exec_command(command)
+
+    def create_new_partition(self, disk, partition='', size=''):
+        cmd = '(echo n; echo p; echo; echo {partition}; echo {size}; echo; echo w) | sudo fdisk {disk}'\
+            .format(disk=disk, partition=partition, size=size)
+        self.exec_command(cmd)
 
     def grow_xfs(self, mount_path='/mnt'):
         command = 'sudo xfs_growfs -d {mount_path}'.format(
@@ -349,6 +418,5 @@ class DebianUtils(RemoteClient):
 
 
 class Fedora7Utils(RemoteClient):
-
     def get_os_type(self):
         return 'fedora7'

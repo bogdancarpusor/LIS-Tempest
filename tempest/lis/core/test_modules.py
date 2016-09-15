@@ -13,6 +13,7 @@
 #    under the License.
 
 import os
+import time
 from tempest import config
 from tempest import exceptions
 from tempest.lib import exceptions as lib_exc
@@ -46,6 +47,12 @@ class LisModules(manager.LisBase):
             )
         self.host_name = ""
         self.instance_name = ""
+        # self.lis_modules = [
+        #     {'name': 'hv_vmbus', 'stress_test': False},
+        #     {'name': 'hv_netvsc', 'stress_test': True},
+        #     {'name': 'hid_hyperv', 'stress_test': True},
+        #     {'name': 'hv_utils', 'stress_test': True},
+        #     {'name': 'hv_storvsc', 'stress_test': False}]
         self.run_ssh = CONF.validation.run_validation and \
             self.image_utils.is_sshable_image(self.image_ref)
         self.ssh_user = CONF.validation.image_ssh_user
@@ -55,40 +62,43 @@ class LisModules(manager.LisBase):
                       ssh=self.run_ssh, ssh_user=self.ssh_user))
 
     def check_lis_modules(self):
-        try:
-            script_name = 'LIS_verifyHyperVIC.sh'
-            script_path = '/scripts/' + script_name
-            destination = '/tmp/'
-            my_path = os.path.abspath(
-                os.path.normpath(os.path.dirname(__file__)))
-            full_script_path = my_path + script_path
-            cmd_params = []
-            self.linux_client.execute_script(
-                script_name, cmd_params, full_script_path, destination)
+        modules = ['hv_vmbus', 'hv_netvsc', 'hid_hyperv', 'hv_utils', 'hv_storvsc']
+        for module in modules:
+            try:
+                self.linux_client.verify_lis_module(module)
+            except lib_exc.SSHExecCommandFailed as exc:
 
-        except lib_exc.SSHExecCommandFailed as exc:
+                LOG.exception(exc)
+                self._log_console_output()
+                raise exc
 
-            LOG.exception(exc)
-            self._log_console_output()
-            raise exc
-
-        except Exception as exc:
-            LOG.exception(exc)
-            self._log_console_output()
-            raise exc
+            except Exception as exc:
+                LOG.exception(exc)
+                self._log_console_output()
+                raise exc
 
     def reload_modules(self):
         try:
+            self.check_lis_modules()
+            try:
+                self.linux_client.exec_command('sudo modprobe -r hyperv_fb')
+                LOG.info('hyperv_fb could be disabled')
+                raise lib_exc.TempestException()
+            except lib_exc.SSHExecCommandFailed as exc:
+                LOG.info('hyperv_fb could not be disabled')
+
             script_name = 'CORE_StressReloadModules.sh'
             script_path = '/scripts/' + script_name
             destination = '/tmp/'
             my_path = os.path.abspath(
-                os.path.normpath(os.path.dirname(__file__)))
+                os.path.normpath(os.path.dirname(__file__))
+            )
             full_script_path = my_path + script_path
             cmd_params = []
             self.linux_client.execute_script(
-                script_name, cmd_params, full_script_path, destination)
-
+                script_name, cmd_params, full_script_path, destination
+            )
+            self.check_lis_modules()
         except exceptions.TimeoutException as exc:
             max_attempts = 5
             while max_attempts:
