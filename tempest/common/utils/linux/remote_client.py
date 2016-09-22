@@ -91,47 +91,52 @@ class RemoteClient(RemoteClientBase):
 
     def install_ntp(self):
         os_details = self.get_os_type()
-
         if os_details['vendor'] in ['Fedora', 'CentOS', 'Red Hat', 'OracleServer']:
-            if not self.exec_command('ntpstat -p 1> /dev/null 2> /dev/null'):
+            try:
+                self.exec_command('ntpstat -p 1> /dev/null 2> /dev/null')
+            except tempest.lib.exceptions.SSHExecCommandFailed:
                 LOG.debug('Attempting to install NTPD')
-                self.exec_command('yum install -y ntp ntdate ntd-doc')
-                self.exec_command('chkconfig ntpd on')
-                self.exec_command('ntpdate pool.ntp.org')
-                self.exec_command('service ntpd start')
+                self.exec_command('sudo yum install -y ntp ntdate ntd-doc')
+                self.exec_command('sudo systemctl enable ntpd.service')
+                self.exec_command('sudo ntpdate pool.ntp.org')
+                self.exec_command('sudo service ntpd start')
                 LOG.debug('NTPD install successfully')
-            self.exec_command('service ntpd restart')
-        elif os_details['vendor'] in ['SUSE Linux', 'openSUSE']:
+            self.exec_command('sudo service ntpd restart')
+        elif os_details['package'] in ['SUSE Linux', 'openSUSE']:
             pass
         elif os_details['package'] == 'deb':
-            if not self.exec_command('ntpq -p 1> /dev/null 2> /dev/null'):
+            try:
+                self.exec_command('ntpq -p 1> /dev/null 2> /dev/null')
+            except tempest.lib.exceptions.SSHExecCommandFailed:
                 LOG.debug('Attempting to install NTP')
-                self.exec_command('apt-get install -y ntp')
+                self.exec_command('sudo apt-get install -y ntp')
                 LOG.debug('NTP installed successfully')
-            self.exec_command('service ntp restart')
+            self.exec_command('sudo service ntp restart')
         else:
             LOG.error('Distro not supported')
             raise tempest.lib.exceptions.NotImplemented
 
     def get_os_type(self):
         os_details = dict()
-
-        if not self.check_file_existence('/etc/lsb-relese'):
-            if self.check_file_existence('/etc/redhat-release') or \
-                    self.check_file_existence('/etc/centos-release') or \
-                    self.check_file_existence('/etc/fedora-release'):
+        if self.check_file_existence('/etc/lsb-relese'):
+            if not self.check_file_existence('/etc/redhat-release') or \
+                    not self.check_file_existence('/etc/centos-release') or \
+                    not self.check_file_existence('/etc/fedora-release'):
                 os_details['package'] = 'rpm'
-                self.exec_command('yum install -y redhat-lsb')
-            elif self.check_file_existence('/etc/SuSE-release'):
-                self.exec_command('zypper install -y lsb-release')
+                self.exec_command('sudo yum install -y redhat-lsb')
+            elif not self.check_file_existence('/etc/SuSE-release'):
+                self.exec_command('sudo zypper install -y lsb-release')
                 os_details['package'] = ''
-            elif self.check_file_existence('/etc/debian_version'):
+            elif not self.check_file_existence('/etc/debian_version'):
                 os_details['package'] = 'deb'
-                self.exec_command('apt-get install -y lsb-release')
+                self.exec_command('sudo apt-get install -y lsb-release')
+            else:
+                LOG.error("Distro not supported")
+                raise tempest.lib.exceptions.NotImplemented
 
-        os_details['vendor'] = self.exec_command('lsb_release -i -s')
-        os_details['release'] = self.exec_command('lsb_release -r -s')
-        os_details['codename'] = self.exec_command('lsb_release -c -s')
+        os_details['vendor'] = self.exec_command('lsb_release -i -s').strip()
+        os_details['release'] = self.exec_command('lsb_release -r -s').strip()
+        os_details['codename'] = self.exec_command('lsb_release -c -s').strip()
         os_details['update'] = ''
         if 'SUSE' in os_details['vendor']:
             if self.exec_command('lsb_release -i -s | grep -q openSUSE'):
@@ -304,6 +309,11 @@ class RemoteClient(RemoteClientBase):
         output = self.exec_command(command)
         return int(output)
 
+    def get_module_version(self, module):
+        return self.exec_command(
+            "modinfo %s | grep vermagic: | awk '{print $2}'" % module
+        )
+
     def get_cpu_count(self):
         command = 'cat /proc/cpuinfo | grep processor | wc -l'
         output = self.exec_command(command)
@@ -331,6 +341,14 @@ class RemoteClient(RemoteClientBase):
         cmd = ' [ -f %s ] && echo 0 || echo 1' % file_name
         return int(self.exec_command(cmd))
 
+    def check_executable_file(self, file_path):
+        cmd = ' [ -x %s ] && echo 0 || echo 1' % file_path
+        return int(self.exec_command(cmd))
+
+    def check_folder_existence(self, folder_path):
+        cmd = ' [ -d %s ] && echo 0 || echo 1' % folder_path
+        return int(self.exec_command(cmd))
+    
     def check_file_size(self, file_name):
         cmd = 'wc -c < %s' % file_name
         return int(self.exec_command(cmd))

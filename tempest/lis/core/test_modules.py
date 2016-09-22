@@ -136,3 +136,36 @@ class LisModules(manager.LisBase):
                                     self.ssh_user, self.keypair['private_key'])
         self.reload_modules()
         self.servers_client.delete_server(self.instance['id'])
+
+    @test.attr(type=['core', 'lis_modules'])
+    @test.services('compute', 'network')
+    def test_lis_modules_version(self):
+        modules = ['hv_vmbus', 'hv_netvsc', 'hid_hyperv', 'hv_utils', 'hv_storvsc']
+        self.spawn_vm()
+        self._initiate_linux_client(self.floating_ip['floatingip']['floating_ip_address'],
+                                    self.ssh_user, self.keypair['private_key'])
+        kernel_version = self.linux_client.get_kernel_version()
+        kernel_version_list = kernel_version.split('.')
+        if len(kernel_version_list) == 7:
+            kernel_version = '.'.join([
+                '.'.join(kernel_version_list[:2]),
+                '.'.join(kernel_version_list[5:])
+            ])
+        for module in modules:
+            try:
+                self.linux_client.verify_lis_module(module)
+                self.assertEquals(
+                    self.linux_client.get_module_version(module),
+                    kernel_version
+                )
+            except lib_exc.SSHExecCommandFailed as exc:
+
+                LOG.exception(exc)
+                self._log_console_output()
+                raise exc
+
+            except Exception as exc:
+                LOG.exception(exc)
+                self._log_console_output()
+                raise exc
+        self.servers_client.delete_server(self.instance['id'])
